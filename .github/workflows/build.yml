@@ -184,18 +184,22 @@ jobs:
           fi
 
           set +e
+          echo "=== ARCHIVOS EN RAÍZ DEL PROYECTO ==="
+          ls -la
+          ls -la app 2>/dev/null || true
+
           if [ -f "gradlew" ]; then
             chmod +x gradlew
-            ./gradlew assembleDebug --stacktrace | tee gradle_build.log
+            ./gradlew assembleDebug --stacktrace 2>&1 | tee gradle_build.log
             GRADLE_EXIT=${PIPESTATUS[0]}
           else
-            gradle assembleDebug --stacktrace | tee gradle_build.log
+            gradle assembleDebug --stacktrace 2>&1 | tee gradle_build.log
             GRADLE_EXIT=${PIPESTATUS[0]}
           fi
 
           if [ "$GRADLE_EXIT" -ne 0 ]; then
-            echo "=== RESUMEN DE ERRORES DE GRADLE ==="
-            grep -E "FAILURE:|Caused by:|> Task |error:|Could not|SDK location|Namespace" gradle_build.log | tail -n 40
+            echo "=== MOTIVO REAL DEL FALLO DE GRADLE ==="
+            grep -vE "^[[:space:]]+at " gradle_build.log | grep -vE "^[[:space:]]*$" | tail -n 35
             exit "$GRADLE_EXIT"
           fi
 
