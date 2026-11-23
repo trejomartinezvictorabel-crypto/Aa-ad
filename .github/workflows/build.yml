@@ -183,11 +183,20 @@ jobs:
             python3 tools/validate_project.py
           fi
 
+          set +e
           if [ -f "gradlew" ]; then
             chmod +x gradlew
-            ./gradlew assembleDebug --stacktrace
+            ./gradlew assembleDebug --stacktrace | tee gradle_build.log
+            GRADLE_EXIT=${PIPESTATUS[0]}
           else
-            gradle assembleDebug --stacktrace
+            gradle assembleDebug --stacktrace | tee gradle_build.log
+            GRADLE_EXIT=${PIPESTATUS[0]}
+          fi
+
+          if [ "$GRADLE_EXIT" -ne 0 ]; then
+            echo "=== RESUMEN DE ERRORES DE GRADLE ==="
+            grep -E "FAILURE:|Caused by:|> Task |error:|Could not|SDK location|Namespace" gradle_build.log | tail -n 40
+            exit "$GRADLE_EXIT"
           fi
 
       - name: Upload built APK
