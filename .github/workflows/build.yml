@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Android 36 SDK, unpack/patch project & build APK
+      - name: Install Android 36 SDK, unpack 015 first & build APK
         shell: bash
         run: |
           set -e
@@ -83,15 +83,20 @@ jobs:
           if res.returncode != 0:
               raise SystemExit(res.returncode)
 
-          # 2. Extraer archivos .zip en orden numérico y organizar carpetas
+          # 2. Extraer PRIMERO el archivo 015 (estructura completa de carpetas) y luego 001..014
           ROOT = Path(".").resolve()
           WORK = ROOT / "_all_in_one_work"
           ZIP_FOLDERS = [ROOT / "zips", ROOT / "paquetes", ROOT]
           SKIP_DIRS = {".git", ".github", ".gradle", "build", "_all_in_one_work", "zips", "paquetes"}
 
-          def sort_key(p: Path):
+          def zip_order_key(p: Path):
               nums = re.findall(r"\d+", p.stem)
-              return (0, int(nums[0]), p.name.lower()) if nums else (1, 0, p.name.lower())
+              if nums:
+                  n = int(nums[-1])
+                  if n == 15:
+                      return (0, 0, p.name.lower())
+                  return (1, n, p.name.lower())
+              return (2, 0, p.name.lower())
 
           zips = []
           seen = set()
@@ -103,14 +108,14 @@ jobs:
                           if rp not in seen:
                               seen.add(rp)
                               zips.append(f)
-          zips = sorted(zips, key=sort_key)
+          zips = sorted(zips, key=zip_order_key)
 
           if WORK.exists():
               shutil.rmtree(WORK, ignore_errors=True)
           WORK.mkdir(parents=True, exist_ok=True)
 
           for zf_path in zips:
-              print(f"Extrayendo ZIP: {zf_path.relative_to(ROOT)}")
+              print(f"Extrayendo ZIP (015 primero): {zf_path.relative_to(ROOT)}")
               with zipfile.ZipFile(zf_path, "r") as zf:
                   for info in zf.infolist():
                       if info.is_dir():
@@ -143,6 +148,23 @@ jobs:
                   shutil.copy2(item, target)
                   print(f"Colocado/actualizado: {rel}")
 
+          # Copiar carpetas lib/ con librerías nativas (.so) hacia app/src/main/jniLibs/
+          jni_dest = ROOT / "app" / "src" / "main" / "jniLibs"
+          for lib_dir in list(ROOT.rglob("lib")):
+              if not lib_dir.is_dir():
+                  continue
+              if any(part in SKIP_DIRS or part == "jniLibs" for part in lib_dir.parts):
+                  continue
+              has_so = any(f.suffix == ".so" for f in lib_dir.rglob("*.so"))
+              if has_so:
+                  print(f"Copiando librerías nativas desde {lib_dir.relative_to(ROOT)} a app/src/main/jniLibs/")
+                  for so_file in lib_dir.rglob("*"):
+                      if so_file.is_file():
+                          rel_so = so_file.relative_to(lib_dir)
+                          out_so = jni_dest / rel_so
+                          out_so.parent.mkdir(parents=True, exist_ok=True)
+                          shutil.copy2(so_file, out_so)
+
           has_root_gradle = (
               (ROOT / "settings.gradle").exists()
               or (ROOT / "settings.gradle.kts").exists()
@@ -170,31 +192,20 @@ jobs:
                       target.parent.mkdir(parents=True, exist_ok=True)
                       shutil.copy2(item, target)
               else:
-                  print("No se encontró proyecto Gradle; generando contenedor base Android 16 (landscape)...")
+                  print("Generando contenedor base Android 16 (landscape) conservando estructura y carpetas...")
                   (ROOT / "gradle" / "wrapper").mkdir(parents=True, exist_ok=True)
                   (ROOT / "app" / "src" / "main" / "java" / "com" / "stoker" / "zuzu").mkdir(parents=True, exist_ok=True)
                   assets_dir = ROOT / "app" / "src" / "main" / "assets"
                   assets_dir.mkdir(parents=True, exist_ok=True)
 
                   if WORK.exists():
-                      game_assets = assets_dir / "game"
                       for item in WORK.rglob("*"):
                           if not item.is_file():
                               continue
                           rel = item.relative_to(WORK)
-                          dst = game_assets / rel
+                          dst = assets_dir / rel
                           dst.parent.mkdir(parents=True, exist_ok=True)
                           shutil.copy2(item, dst)
-
-                  index_html = assets_dir / "game" / "index.html"
-                  if not index_html.exists():
-                      (assets_dir / "game").mkdir(parents=True, exist_ok=True)
-                      index_html.write_text(
-                          "<!doctype html><html><head><meta charset='utf-8'><title>Stoker Zuzy</title>"
-                          "<style>body{margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;}</style>"
-                          "</head><body><div>Stoker@Zuzy - Android 16 Landscape Ready</div></body></html>",
-                          encoding="utf-8",
-                      )
 
                   (ROOT / "settings.gradle").write_text("rootProject.name = 'StokerZuzy'\ninclude ':app'\n", encoding="utf-8")
                   (ROOT / "gradle.properties").write_text(
@@ -298,18 +309,14 @@ jobs:
                       "        ws.setDomStorageEnabled(true);\n"
                       "        ws.setAllowFileAccess(true);\n"
                       "        webView.setWebViewClient(new WebViewClient());\n"
-                      "        webView.loadUrl(\"file:///android_asset/game/index.html\");\n"
+                      "        webView.loadUrl(\"file:///android_asset/index.html\");\n"
                       "        setContentView(webView);\n"
                       "    }\n"
                       "}\n",
                       encoding="utf-8",
                   )
                   gradlew_sh = ROOT / "gradlew"
-                  gradlew_sh.write_text(
-                      "#!/usr/bin/env sh\n"
-                      "exec gradle \"$@\"\n",
-                      encoding="utf-8",
-                  )
+                  gradlew_sh.write_text("#!/usr/bin/env sh\nexec gradle \"$@\"\n", encoding="utf-8")
                   gradlew_sh.chmod(0o755)
 
           # 3. Parchear AndroidManifest.xml (landscape + permisos), Gradle (SDK 36) y conflicto de Kotlin
@@ -363,7 +370,6 @@ jobs:
           if "kotlin.stdlib.default.dependency=false" not in gp_text:
               gp_text = (gp_text.rstrip() + "\nkotlin.stdlib.default.dependency=false\n").lstrip()
               gradle_props.write_text(gp_text, encoding="utf-8")
-              print("gradle.properties actualizado para evitar choque de kotlin-stdlib")
 
           wrapper = ROOT / "gradle" / "wrapper" / "gradle-wrapper.properties"
           if wrapper.exists():
@@ -371,7 +377,6 @@ jobs:
               w_upd = re.sub(r"gradle-[\d.]+-(all|bin)\.zip", "gradle-8.11.1-bin.zip", w_orig)
               if w_upd != w_orig:
                   wrapper.write_text(w_upd, encoding="utf-8")
-                  print("Gradle wrapper en 8.11.1")
 
           shutil.rmtree(WORK, ignore_errors=True)
           EOF
@@ -383,7 +388,7 @@ jobs:
           set +e
           echo "=== ARCHIVOS EN RAÍZ DEL PROYECTO ==="
           ls -la
-          ls -la app 2>/dev/null || true
+          ls -la app/src/main/jniLibs 2>/dev/null || true
 
           if [ -f "gradlew" ]; then
             chmod +x gradlew
