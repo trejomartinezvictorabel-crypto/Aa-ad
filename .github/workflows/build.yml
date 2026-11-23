@@ -14,6 +14,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,10 +33,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Set up Android SDK base
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android 36 SDK & unpack/patch project
+      - name: Install Android 36 SDK, unpack/patch project & build APK
         shell: bash
         run: |
           set -e
@@ -44,21 +45,34 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          # 1. Instalar SDK 36 y build-tools sin depender de inputs inválidos ni paquete 'tools'
+          # 1. Localizar sdkmanager y aceptar licencias + instalar SDK 36 y build-tools
           sdk_root = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT") or "/usr/local/lib/android/sdk"
-          sdkmanager = shutil.which("sdkmanager")
+          sdkmanager = None
+          for candidate in [
+              Path(sdk_root) / "cmdline-tools" / "latest" / "bin" / "sdkmanager",
+              Path(sdk_root) / "cmdline-tools" / "16.0" / "bin" / "sdkmanager",
+          ]:
+              if candidate.exists() and os.access(candidate, os.X_OK):
+                  sdkmanager = str(candidate)
+                  break
+
+          if not sdkmanager:
+              sdkmanager = shutil.which("sdkmanager")
+
           if not sdkmanager:
               for root, _, files in os.walk(sdk_root):
                   if "sdkmanager" in files:
-                      candidate = os.path.join(root, "sdkmanager")
-                      if os.access(candidate, os.X_OK):
-                          sdkmanager = candidate
+                      p = os.path.join(root, "sdkmanager")
+                      if os.access(p, os.X_OK):
+                          sdkmanager = p
                           break
 
           if not sdkmanager:
               raise RuntimeError("No se encontró sdkmanager en el runner")
 
+          print(f"Usando sdkmanager: {sdkmanager}")
           pkgs = ["platform-tools", "platforms;android-36", "build-tools;35.0.0"]
+
           p_lic = subprocess.Popen(["yes"], stdout=subprocess.PIPE)
           subprocess.run([sdkmanager, f"--sdk_root={sdk_root}", "--licenses"], stdin=p_lic.stdout, check=False)
           p_lic.stdout.close()
@@ -166,4 +180,19 @@ jobs:
           EOF
 
           if [ -f "tools/validate_project.py" ]; then
-            python3
+            python3 tools/validate_project.py
+          fi
+
+          if [ -f "gradlew" ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
+          fi
+
+      - name: Upload built APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: juego-android16-landscape
+          path: "**/*.apk"
+          if-no-files-found: error
