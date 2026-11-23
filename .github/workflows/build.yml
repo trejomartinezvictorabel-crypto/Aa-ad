@@ -124,7 +124,6 @@ jobs:
                           shutil.copyfileobj(src, dst)
 
           if zips:
-              # Detectar si dentro de WORK hay una carpeta raíz con settings.gradle / build.gradle
               gradle_roots = []
               for candidate in [WORK] + [p for p in WORK.rglob("*") if p.is_dir()]:
                   if any(part in SKIP_DIRS for part in candidate.relative_to(WORK).parts):
@@ -144,7 +143,6 @@ jobs:
                   shutil.copy2(item, target)
                   print(f"Colocado/actualizado: {rel}")
 
-          # Si aún no hay settings.gradle / build.gradle en ROOT, buscar en subcarpetas de ROOT o crear contenedor Android 16
           has_root_gradle = (
               (ROOT / "settings.gradle").exists()
               or (ROOT / "settings.gradle.kts").exists()
@@ -178,7 +176,6 @@ jobs:
                   assets_dir = ROOT / "app" / "src" / "main" / "assets"
                   assets_dir.mkdir(parents=True, exist_ok=True)
 
-                  # Copiar archivos extraídos en WORK (si los hubo) a assets/game
                   if WORK.exists():
                       game_assets = assets_dir / "game"
                       for item in WORK.rglob("*"):
@@ -200,7 +197,12 @@ jobs:
                       )
 
                   (ROOT / "settings.gradle").write_text("rootProject.name = 'StokerZuzy'\ninclude ':app'\n", encoding="utf-8")
-                  (ROOT / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2048m\nandroid.useAndroidX=true\n", encoding="utf-8")
+                  (ROOT / "gradle.properties").write_text(
+                      "org.gradle.jvmargs=-Xmx2048m\n"
+                      "android.useAndroidX=true\n"
+                      "kotlin.stdlib.default.dependency=false\n",
+                      encoding="utf-8",
+                  )
                   (ROOT / "gradle" / "wrapper" / "gradle-wrapper.properties").write_text(
                       "distributionBase=GRADLE_USER_HOME\n"
                       "distributionPath=wrapper/dists\n"
@@ -310,7 +312,7 @@ jobs:
                   )
                   gradlew_sh.chmod(0o755)
 
-          # 3. Parchear AndroidManifest.xml (landscape + permisos) y Gradle (SDK 36)
+          # 3. Parchear AndroidManifest.xml (landscape + permisos), Gradle (SDK 36) y conflicto de Kotlin
           for manifest in ROOT.rglob("AndroidManifest.xml"):
               if any(part in SKIP_DIRS for part in manifest.parts):
                   continue
@@ -328,6 +330,18 @@ jobs:
               manifest.write_text(txt, encoding="utf-8")
               print(f"Manifest listo (landscape + SDK 36): {manifest.relative_to(ROOT)}")
 
+          kotlin_fix_block = (
+              "\nallprojects {\n"
+              "    configurations.all {\n"
+              "        resolutionStrategy {\n"
+              "            force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'\n"
+              "            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'\n"
+              "            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'\n"
+              "        }\n"
+              "    }\n"
+              "}\n"
+          )
+
           for gfile in ROOT.rglob("build.gradle*"):
               if any(part in SKIP_DIRS for part in gfile.parts):
                   continue
@@ -338,9 +352,18 @@ jobs:
               upd = re.sub(r"\btargetSdk\s*=?\s*\d+", "targetSdk 36", upd)
               upd = re.sub(r"\btargetSdkVersion\s*=?\s*\d+", "targetSdkVersion 36", upd)
               upd = re.sub(r"com\.android\.application:[\d.]+", "com.android.application:8.3.2", upd)
+              if gfile.name == "build.gradle" and "force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'" not in upd:
+                  upd = upd + kotlin_fix_block
               if upd != orig:
                   gfile.write_text(upd, encoding="utf-8")
                   print(f"Gradle actualizado: {gfile.relative_to(ROOT)}")
+
+          gradle_props = ROOT / "gradle.properties"
+          gp_text = gradle_props.read_text(encoding="utf-8", errors="ignore") if gradle_props.exists() else ""
+          if "kotlin.stdlib.default.dependency=false" not in gp_text:
+              gp_text = (gp_text.rstrip() + "\nkotlin.stdlib.default.dependency=false\n").lstrip()
+              gradle_props.write_text(gp_text, encoding="utf-8")
+              print("gradle.properties actualizado para evitar choque de kotlin-stdlib")
 
           wrapper = ROOT / "gradle" / "wrapper" / "gradle-wrapper.properties"
           if wrapper.exists():
