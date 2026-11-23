@@ -124,7 +124,15 @@ jobs:
                           shutil.copyfileobj(src, dst)
 
           if zips:
-              source_base = WORK / "app" if ((WORK / "app" / "build.gradle").exists() or (WORK / "app" / "build.gradle.kts").exists()) else WORK
+              # Detectar si dentro de WORK hay una carpeta raíz con settings.gradle / build.gradle
+              gradle_roots = []
+              for candidate in [WORK] + [p for p in WORK.rglob("*") if p.is_dir()]:
+                  if any(part in SKIP_DIRS for part in candidate.relative_to(WORK).parts):
+                      continue
+                  if (candidate / "settings.gradle").exists() or (candidate / "settings.gradle.kts").exists():
+                      gradle_roots.append(candidate)
+
+              source_base = gradle_roots[0] if gradle_roots else WORK
               for item in source_base.rglob("*"):
                   if not item.is_file():
                       continue
@@ -135,6 +143,172 @@ jobs:
                   target.parent.mkdir(parents=True, exist_ok=True)
                   shutil.copy2(item, target)
                   print(f"Colocado/actualizado: {rel}")
+
+          # Si aún no hay settings.gradle / build.gradle en ROOT, buscar en subcarpetas de ROOT o crear contenedor Android 16
+          has_root_gradle = (
+              (ROOT / "settings.gradle").exists()
+              or (ROOT / "settings.gradle.kts").exists()
+              or (ROOT / "build.gradle").exists()
+              or (ROOT / "build.gradle.kts").exists()
+          )
+
+          if not has_root_gradle:
+              sub_settings = None
+              for p in ROOT.rglob("settings.gradle*"):
+                  if any(part in SKIP_DIRS for part in p.parts):
+                      continue
+                  sub_settings = p.parent
+                  break
+
+              if sub_settings and sub_settings != ROOT:
+                  print(f"Moviendo proyecto Gradle desde subcarpeta: {sub_settings.relative_to(ROOT)}")
+                  for item in sub_settings.rglob("*"):
+                      if not item.is_file():
+                          continue
+                      rel = item.relative_to(sub_settings)
+                      if rel.parts and rel.parts[0] in SKIP_DIRS:
+                          continue
+                      target = ROOT / rel
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      shutil.copy2(item, target)
+              else:
+                  print("No se encontró proyecto Gradle; generando contenedor base Android 16 (landscape)...")
+                  (ROOT / "gradle" / "wrapper").mkdir(parents=True, exist_ok=True)
+                  (ROOT / "app" / "src" / "main" / "java" / "com" / "stoker" / "zuzu").mkdir(parents=True, exist_ok=True)
+                  assets_dir = ROOT / "app" / "src" / "main" / "assets"
+                  assets_dir.mkdir(parents=True, exist_ok=True)
+
+                  # Copiar archivos extraídos en WORK (si los hubo) a assets/game
+                  if WORK.exists():
+                      game_assets = assets_dir / "game"
+                      for item in WORK.rglob("*"):
+                          if not item.is_file():
+                              continue
+                          rel = item.relative_to(WORK)
+                          dst = game_assets / rel
+                          dst.parent.mkdir(parents=True, exist_ok=True)
+                          shutil.copy2(item, dst)
+
+                  index_html = assets_dir / "game" / "index.html"
+                  if not index_html.exists():
+                      (assets_dir / "game").mkdir(parents=True, exist_ok=True)
+                      index_html.write_text(
+                          "<!doctype html><html><head><meta charset='utf-8'><title>Stoker Zuzy</title>"
+                          "<style>body{margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;}</style>"
+                          "</head><body><div>Stoker@Zuzy - Android 16 Landscape Ready</div></body></html>",
+                          encoding="utf-8",
+                      )
+
+                  (ROOT / "settings.gradle").write_text("rootProject.name = 'StokerZuzy'\ninclude ':app'\n", encoding="utf-8")
+                  (ROOT / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx2048m\nandroid.useAndroidX=true\n", encoding="utf-8")
+                  (ROOT / "gradle" / "wrapper" / "gradle-wrapper.properties").write_text(
+                      "distributionBase=GRADLE_USER_HOME\n"
+                      "distributionPath=wrapper/dists\n"
+                      "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-bin.zip\n"
+                      "zipStoreBase=GRADLE_USER_HOME\n"
+                      "zipStorePath=wrapper/dists\n",
+                      encoding="utf-8",
+                  )
+                  (ROOT / "build.gradle").write_text(
+                      "buildscript {\n"
+                      "    repositories {\n"
+                      "        google()\n"
+                      "        mavenCentral()\n"
+                      "    }\n"
+                      "    dependencies {\n"
+                      "        classpath 'com.android.tools.build:gradle:8.3.2'\n"
+                      "    }\n"
+                      "}\n"
+                      "allprojects {\n"
+                      "    repositories {\n"
+                      "        google()\n"
+                      "        mavenCentral()\n"
+                      "    }\n"
+                      "}\n",
+                      encoding="utf-8",
+                  )
+                  (ROOT / "app" / "build.gradle").write_text(
+                      "plugins {\n"
+                      "    id 'com.android.application'\n"
+                      "}\n"
+                      "android {\n"
+                      "    namespace 'com.stoker.zuzu'\n"
+                      "    compileSdk 36\n"
+                      "    defaultConfig {\n"
+                      "        applicationId 'com.stoker.zuzu'\n"
+                      "        minSdk 24\n"
+                      "        targetSdk 36\n"
+                      "        versionCode 1\n"
+                      "        versionName '1.0'\n"
+                      "    }\n"
+                      "    buildTypes {\n"
+                      "        release {\n"
+                      "            minifyEnabled false\n"
+                      "        }\n"
+                      "        debug {\n"
+                      "            minifyEnabled false\n"
+                      "        }\n"
+                      "    }\n"
+                      "    compileOptions {\n"
+                      "        sourceCompatibility JavaVersion.VERSION_17\n"
+                      "        targetCompatibility JavaVersion.VERSION_17\n"
+                      "    }\n"
+                      "}\n"
+                      "dependencies {\n"
+                      "    implementation 'androidx.appcompat:appcompat:1.7.0'\n"
+                      "}\n",
+                      encoding="utf-8",
+                  )
+                  (ROOT / "app" / "src" / "main" / "AndroidManifest.xml").write_text(
+                      "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                      "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">\n"
+                      "    <uses-permission android:name=\"android.permission.CAMERA\" />\n"
+                      "    <uses-permission android:name=\"android.permission.RECORD_AUDIO\" />\n"
+                      "    <uses-permission android:name=\"android.permission.INTERNET\" />\n"
+                      "    <application android:label=\"Stoker@Zuzy\" android:usesCleartextTraffic=\"true\">\n"
+                      "        <activity android:name=\"com.stoker.zuzu.MainActivity\"\n"
+                      "            android:exported=\"true\"\n"
+                      "            android:screenOrientation=\"landscape\"\n"
+                      "            android:configChanges=\"orientation|screenSize|keyboardHidden\">\n"
+                      "            <intent-filter>\n"
+                      "                <action android:name=\"android.intent.action.MAIN\" />\n"
+                      "                <category android:name=\"android.intent.category.LAUNCHER\" />\n"
+                      "            </intent-filter>\n"
+                      "        </activity>\n"
+                      "    </application>\n"
+                      "</manifest>\n",
+                      encoding="utf-8",
+                  )
+                  (ROOT / "app" / "src" / "main" / "java" / "com" / "stoker" / "zuzu" / "MainActivity.java").write_text(
+                      "package com.stoker.zuzu;\n"
+                      "import android.os.Bundle;\n"
+                      "import android.webkit.WebSettings;\n"
+                      "import android.webkit.WebView;\n"
+                      "import android.webkit.WebViewClient;\n"
+                      "import androidx.appcompat.app.AppCompatActivity;\n"
+                      "public class MainActivity extends AppCompatActivity {\n"
+                      "    @Override\n"
+                      "    protected void onCreate(Bundle savedInstanceState) {\n"
+                      "        super.onCreate(savedInstanceState);\n"
+                      "        WebView webView = new WebView(this);\n"
+                      "        WebSettings ws = webView.getSettings();\n"
+                      "        ws.setJavaScriptEnabled(true);\n"
+                      "        ws.setDomStorageEnabled(true);\n"
+                      "        ws.setAllowFileAccess(true);\n"
+                      "        webView.setWebViewClient(new WebViewClient());\n"
+                      "        webView.loadUrl(\"file:///android_asset/game/index.html\");\n"
+                      "        setContentView(webView);\n"
+                      "    }\n"
+                      "}\n",
+                      encoding="utf-8",
+                  )
+                  gradlew_sh = ROOT / "gradlew"
+                  gradlew_sh.write_text(
+                      "#!/usr/bin/env sh\n"
+                      "exec gradle \"$@\"\n",
+                      encoding="utf-8",
+                  )
+                  gradlew_sh.chmod(0o755)
 
           # 3. Parchear AndroidManifest.xml (landscape + permisos) y Gradle (SDK 36)
           for manifest in ROOT.rglob("AndroidManifest.xml"):
