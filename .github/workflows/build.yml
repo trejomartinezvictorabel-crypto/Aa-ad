@@ -254,6 +254,11 @@ jobs:
                       "        versionCode 1\n"
                       "        versionName '1.0'\n"
                       "    }\n"
+                      "    packaging {\n"
+                      "        jniLibs {\n"
+                      "            useLegacyPackaging true\n"
+                      "        }\n"
+                      "    }\n"
                       "    buildTypes {\n"
                       "        release {\n"
                       "            minifyEnabled false\n"
@@ -388,7 +393,8 @@ jobs:
           set +e
           echo "=== ARCHIVOS EN RAÍZ DEL PROYECTO ==="
           ls -la
-          ls -la app/src/main/jniLibs 2>/dev/null || true
+          echo "=== ARQUITECTURAS Y LIBRERÍAS .SO ==="
+          find app/src/main/jniLibs -maxdepth 3 2>/dev/null || true
 
           if [ -f "gradlew" ]; then
             chmod +x gradlew
