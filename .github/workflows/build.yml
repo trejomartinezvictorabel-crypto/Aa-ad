@@ -1,1 +1,408 @@
+name: Compilar APK Universal - Android 16
 
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.27.0'
+          cache: true
+
+      - name: 1. Preparar modelo de Vosk y base inicial
+        run: |
+          python3 - <<'PY'
+          import os, urllib.request
+
+          os.makedirs('assets/models', exist_ok=True)
+          model_zip = 'assets/models/vosk-model-small-es-0.42.zip'
+          if not os.path.exists(model_zip) or os.path.getsize(model_zip) < 1000000:
+              print('Descargando modelo de Vosk (español)...')
+              url = 'https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip'
+              urllib.request.urlretrieve(url, model_zip)
+              print('Modelo de Vosk listo en assets/models/')
+          PY
+
+      - name: 2. Descomprimir cualquier archivo .zip de forma universal
+        run: |
+          python3 - <<'PY'
+          import glob, os, shutil, zipfile
+
+          raiz = os.path.abspath('.')
+          zips = [
+              z for z in sorted(glob.glob(os.path.join(raiz, '*.zip')))
+              if not os.path.basename(z).startswith('vosk-model-')
+          ]
+
+          if not zips:
+              print('No se encontraron archivos .zip adicionales en la raíz; usando archivos actuales del repo.')
+          else:
+              for zpath in zips:
+                  zname = os.path.basename(zpath)
+                  print(f'Descomprimiendo {zname}...')
+                  tmp_dir = os.path.join('/tmp', 'zip_work_' + zname)
+                  shutil.rmtree(tmp_dir, ignore_errors=True)
+                  os.makedirs(tmp_dir, exist_ok=True)
+
+                  with zipfile.ZipFile(zpath, 'r') as zf:
+                      for member in zf.namelist():
+                          dest = os.path.abspath(os.path.join(tmp_dir, member))
+                          if not dest.startswith(os.path.abspath(tmp_dir) + os.sep):
+                              raise SystemExit(f'ERROR: ruta insegura en ZIP: {member}')
+                      zf.extractall(tmp_dir)
+
+                  # Busca la carpeta raíz del proyecto dentro del ZIP (donde esté pubspec.yaml o lib/main.dart)
+                  project_src = tmp_dir
+                  best_depth = 999
+                  for dirpath, _, filenames in os.walk(tmp_dir):
+                      if 'pubspec.yaml' in filenames or ('main.dart' in filenames and os.path.basename(dirpath) == 'lib'):
+                          candidate = os.path.dirname(dirpath) if os.path.basename(dirpath) == 'lib' and 'pubspec.yaml' not in filenames else dirpath
+                          depth = candidate.count(os.sep)
+                          if depth < best_depth:
+                              best_depth = depth
+                              project_src = candidate
+
+                  print(f'Origen detectado dentro del ZIP: {project_src}')
+
+                  for dirpath, _, filenames in os.walk(project_src):
+                      for fname in filenames:
+                          if fname.startswith('.'):
+                              continue
+                          src_f = os.path.join(dirpath, fname)
+                          rel_f = os.path.relpath(src_f, project_src)
+                          if rel_f.startswith('.github/workflows/'):
+                              continue
+                          dst_f = os.path.abspath(os.path.join(raiz, rel_f))
+                          if not dst_f.startswith(raiz + os.sep):
+                              continue
+                          os.makedirs(os.path.dirname(dst_f), exist_ok=True)
+                          shutil.copy2(src_f, dst_f)
+
+                  # Si el ZIP contenía una carpeta de simulación 3D o assets extra, los conserva
+                  for dirpath, dirnames, _ in os.walk(tmp_dir):
+                      for dname in dirnames:
+                          if any(k in dname.lower() for k in ('simulacion', '3d', 'sim')):
+                              src_d = os.path.join(dirpath, dname)
+                              shutil.copytree(src_d, os.path.join(raiz, dname), dirs_exist_ok=True)
+                              os.makedirs(os.path.join(raiz, 'lib'), exist_ok=True)
+                              shutil.copytree(src_d, os.path.join(raiz, 'lib', dname), dirs_exist_ok=True)
+          PY
+
+      - name: 3. Asegurar pubspec.yaml y plataforma Android base
+        run: |
+          python3 - <<'PY'
+          import os
+
+          if not os.path.exists('pubspec.yaml'):
+              pubspec_content = '''name: simulacion_3d
+          description: Aplicación móvil compatible con Android 16.
+          publish_to: "none"
+          version: 1.0.0+1
+
+          environment:
+            sdk: ">=3.0.0 <4.0.0"
+
+          dependencies:
+            flutter:
+              sdk: flutter
+            flutter_map: ^6.2.1
+            latlong2: ^0.9.1
+            geolocator: ^12.0.0
+            flutter_tts: ^4.0.2
+            vosk_flutter: ^0.3.48
+            sqflite: ^2.3.3+1
+            path: ^1.9.0
+            path_provider: ^2.1.4
+            file_picker: ^8.1.2
+            permission_handler: ^11.3.1
+            wakelock_plus: ^1.2.8
+            flutter_compass: ^0.8.1
+            webview_flutter: ^4.10.0
+
+          dev_dependencies:
+            flutter_test:
+              sdk: flutter
+            flutter_lints: ^4.0.0
+
+          dependency_overrides:
+            http: ^1.2.2
+
+          flutter:
+            uses-material-design: true
+            assets:
+              - assets/models/
+          '''
+              with open('pubspec.yaml', 'w', encoding='utf-8') as f:
+                  f.write(pubspec_content)
+              print('Creado pubspec.yaml base.')
+          PY
+          if [ ! -d "android/app" ]; then
+            flutter create . --org com.albanil.app --project-name simulacion_3d --platforms=android
+          fi
+
+      - name: 4. Validador y actualizador de dependencias y archivos para Android 16 (Python)
+        run: |
+          mkdir -p tools
+          cat <<'EOF' > tools/android16_compat.py
+          #!/usr/bin/env python3
+          import glob, os, re, subprocess
+
+          ROOT = os.path.abspath('.')
+
+          # Rangos y versiones mínimas/estables recomendadas para Android 16 / Flutter 3.27 / AGP 8.3.2
+          ANDROID16_DEPS_FIXES = {
+              'permission_handler': '^11.3.1',
+              'webview_flutter': '^4.10.0',
+              'geolocator': '^12.0.0',
+              'wakelock_plus': '^1.2.8',
+              'path_provider': '^2.1.4',
+              'sqflite': '^2.3.3+1',
+              'flutter_tts': '^4.0.2',
+              'file_picker': '^8.1.2',
+              'flutter_map': '^6.2.1',
+              'latlong2': '^0.9.1',
+              'flutter_compass': '^0.8.1',
+              'vosk_flutter': '^0.3.48',
+          }
+
+          def parse_ver(v):
+              nums = [int(x) for x in re.findall(r'\d+', v)]
+              while len(nums) < 3:
+                  nums.append(0)
+              return tuple(nums[:3])
+
+          def verify_and_update_dependencies():
+              pub_path = os.path.join(ROOT, 'pubspec.yaml')
+              if not os.path.exists(pub_path):
+                  return
+
+              txt = open(pub_path, encoding='utf-8').read()
+
+              # 1. Elimina referencias directas a dbus para evitar conflictos de escritorio Linux / AGPL
+              txt = re.sub(r'(?m)^[ \t]*dbus:[^\n]*\n', '', txt)
+              txt = re.sub(r'(?ms)^  dbus:\s*\n(?:    [^\n]*\n)+', '', txt)
+
+              # 2. Asegura SDK Dart >=3.0.0 <4.0.0
+              if re.search(r'(?m)^\s*sdk:\s*', txt):
+                  txt = re.sub(r'(?m)^(\s*sdk:\s*).*$', r'\1">=3.0.0 <4.0.0"', txt, count=1)
+
+              # 3. Verifica y sube dependencias antiguas conocidas si están por debajo de versiones compatibles con Android 16
+              for pkg, target_spec in ANDROID16_DEPS_FIXES.items():
+                  target_tuple = parse_ver(target_spec)
+                  m = re.search(rf'(?m)^(\s*{re.escape(pkg)}:\s*)([^\n#]+)(.*)$', txt)
+                  if m:
+                      prefix, cur_ver, suffix = m.group(1), m.group(2).strip(), m.group(3)
+                      if not cur_ver.startswith(('path:', 'git:')):
+                          cur_tuple = parse_ver(cur_ver)
+                          if cur_tuple < target_tuple:
+                              txt = txt[:m.start()] + f'{prefix}{target_spec}{suffix}' + txt[m.end():]
+                              print(f'[Compat Android 16] Actualizada dependencia {pkg}: {cur_ver} -> {target_spec}')
+
+              # 4. Asegura assets/models/ si existe la carpeta
+              if os.path.isdir(os.path.join(ROOT, 'assets/models')) and 'assets/models/' not in txt:
+                  if 'flutter:' in txt:
+                      txt = re.sub(
+                          r'(?m)^flutter:\s*\n',
+                          'flutter:\n  uses-material-design: true\n  assets:\n    - assets/models/\n',
+                          txt,
+                          count=1,
+                      )
+
+              open(pub_path, 'w', encoding='utf-8').write(txt)
+              print('[Compat Android 16] pubspec.yaml verificado.')
+
+          def patch_gradle_and_kotlin():
+              wrapper = os.path.join(ROOT, 'android/gradle/wrapper/gradle-wrapper.properties')
+              if os.path.exists(wrapper):
+                  wtxt = open(wrapper, encoding='utf-8').read()
+                  nwtxt = re.sub(
+                      r'(?m)^distributionUrl=.*$',
+                      r'distributionUrl=https\://services.gradle.org/distributions/gradle-8.10.2-bin.zip',
+                      wtxt,
+                  )
+                  if nwtxt != wtxt:
+                      open(wrapper, 'w', encoding='utf-8').write(nwtxt)
+                      print('[Compat Android 16] Gradle Wrapper -> 8.10.2')
+
+              for rel in [
+                  'android/settings.gradle',
+                  'android/settings.gradle.kts',
+                  'android/build.gradle',
+                  'android/build.gradle.kts',
+              ]:
+                  fp = os.path.join(ROOT, rel)
+                  if not os.path.exists(fp):
+                      continue
+                  t = open(fp, encoding='utf-8').read()
+                  nt = re.sub(r'(com\.android\.application["\']?\s*(?:version\s*["\']|:))\d+\.\d+\.\d+', r'\g<1>8.3.2', t)
+                  nt = re.sub(r'(com\.android\.tools\.build:gradle:)\d+\.\d+\.\d+', r'\g<1>8.3.2', nt)
+                  nt = re.sub(r'(org\.jetbrains\.kotlin\.android["\']?\s*(?:version\s*["\']|:))\d+\.\d+\.\d+', r'\g<1>2.1.0', nt)
+                  nt = re.sub(r'(org\.jetbrains\.kotlin:kotlin-gradle-plugin:)\d+\.\d+\.\d+', r'\g<1>2.1.0', nt)
+                  if nt != t:
+                      open(fp, 'w', encoding='utf-8').write(nt)
+                      print(f'[Compat Android 16] AGP 8.3.2 / Kotlin 2.1.0 aplicado en {rel}')
+
+              os.makedirs(os.path.join(ROOT, 'android/app'), exist_ok=True)
+              p12 = os.path.join(ROOT, 'android/app/ci-keystore.p12')
+              if not os.path.exists(p12):
+                  subprocess.run([
+                      'keytool', '-genkeypair', '-noprompt',
+                      '-keystore', p12, '-storetype', 'PKCS12',
+                      '-storepass', 'android', '-keypass', 'android',
+                      '-alias', 'app_android16', '-keyalg', 'RSA',
+                      '-keysize', '2048', '-validity', '10000',
+                      '-dname', 'CN=Android16App, OU=Mobile, O=Dev, C=MX'
+                  ], check=True)
+                  print('[Compat Android 16] Keystore de firma fija generado.')
+
+              for rel in ('android/app/build.gradle', 'android/app/build.gradle.kts'):
+                  fp = os.path.join(ROOT, rel)
+                  if not os.path.exists(fp):
+                      continue
+                  t = open(fp, encoding='utf-8').read()
+                  kts = rel.endswith('.kts')
+                  nt = re.sub(r'\bcompileSdk(?:Version)?\s*=?\s*\d+', 'compileSdk = 36' if kts else 'compileSdk 36', t)
+                  nt = re.sub(r'\btargetSdk(?:Version)?\s*=?\s*\d+', 'targetSdk = 36' if kts else 'targetSdk 36', nt)
+                  nt = re.sub(r'\bminSdk(?:Version)?\s*=?\s*\d+', 'minSdk = 24' if kts else 'minSdk 24', nt)
+                  if 'ci-keystore.p12' not in nt:
+                      bloque = (
+                          "android {\n"
+                          "    signingConfigs {\n"
+                          "        debug {\n"
+                          "            storeFile file('ci-keystore.p12')\n"
+                          "            storePassword 'android'\n"
+                          "            keyAlias 'app_android16'\n"
+                          "            keyPassword 'android'\n"
+                          "            storeType 'pkcs12'\n"
+                          "        }\n"
+                          "    }\n"
+                      )
+                      nt, n = re.subn(r'^android\s*\{\s*\n', bloque, nt, count=1, flags=re.M)
+                      if n == 1:
+                          print(f'[Compat Android 16] Firma debug configurada en {rel}')
+                  if nt != t:
+                      open(fp, 'w', encoding='utf-8').write(nt)
+                      print(f'[Compat Android 16] SDK 36 configurado en {rel}')
+
+          def patch_manifest_and_dart():
+              manifest = os.path.join(ROOT, 'android/app/src/main/AndroidManifest.xml')
+              if os.path.exists(manifest):
+                  t = open(manifest, encoding='utf-8').read()
+                  perms = [
+                      'android.permission.INTERNET',
+                      'android.permission.ACCESS_FINE_LOCATION',
+                      'android.permission.ACCESS_COARSE_LOCATION',
+                      'android.permission.FOREGROUND_SERVICE',
+                      'android.permission.FOREGROUND_SERVICE_LOCATION',
+                      'android.permission.RECORD_AUDIO',
+                      'android.permission.POST_NOTIFICATIONS',
+                      'android.permission.WAKE_LOCK',
+                  ]
+                  for perm in perms:
+                      if perm not in t and '<application' in t:
+                          t = t.replace('<application', f'    <uses-permission android:name="{perm}"/>\n    <application', 1)
+
+                  if '<queries>' not in t and '</manifest>' in t:
+                      q = (
+                          '    <queries>\n'
+                          '        <intent><action android:name="android.intent.action.TTS_SERVICE"/></intent>\n'
+                          '        <intent><action android:name="android.speech.RecognitionService"/></intent>\n'
+                          '    </queries>\n'
+                      )
+                      t = t.replace('</manifest>', q + '</manifest>', 1)
+
+                  if 'enableOnBackInvokedCallback' not in t and '<application' in t:
+                      t = re.sub(r'<application\b', '<application android:enableOnBackInvokedCallback="false"', t, count=1)
+
+                  open(manifest, 'w', encoding='utf-8').write(t)
+                  print('[Compat Android 16] AndroidManifest.xml actualizado.')
+
+              for df in glob.glob(os.path.join(ROOT, 'lib/**/*.dart'), recursive=True):
+                  t = open(df, encoding='utf-8').read()
+                  nt = t.replace(
+                      'Uint8List.sublistView(trozo, ini, i + 1)',
+                      'Uint8List.fromList(trozo.sublist(ini, i + 1))',
+                  ).replace(
+                      'Uint8List.sublistView(trozo, ini, trozo.length)',
+                      'Uint8List.fromList(trozo.sublist(ini, trozo.length))',
+                  )
+                  if nt != t:
+                      open(df, 'w', encoding='utf-8').write(nt)
+                      print(f'[Compat Android 16] Parcheado Uint8List en {os.path.relpath(df, ROOT)}')
+
+          def main():
+              verify_and_update_dependencies()
+              patch_gradle_and_kotlin()
+              patch_manifest_and_dart()
+              print('[Compat Android 16] Validación y actualización terminada.')
+
+          if __name__ == '__main__':
+              main()
+          EOF
+          python3 tools/android16_compat.py
+
+      - name: 5. Parchear plugins en pub-cache (vosk_flutter)
+        run: |
+          python3 - <<'PY'
+          import glob
+
+          for manifest_path in glob.glob('/home/runner/.pub-cache/hosted/**/vosk_flutter-*/android/src/main/AndroidManifest.xml', recursive=True):
+              c = open(manifest_path, encoding='utf-8').read()
+              if 'package="org.vosk.vosk_flutter"' in c:
+                  open(manifest_path, 'w', encoding='utf-8').write(c.replace('package="org.vosk.vosk_flutter"', ''))
+
+          for bg_path in glob.glob('/home/runner/.pub-cache/hosted/**/vosk_flutter-*/android/build.gradle', recursive=True):
+              c = open(bg_path, encoding='utf-8').read()
+              if 'namespace ' not in c:
+                  open(bg_path, 'w', encoding='utf-8').write(c.replace('android {', 'android {\n    namespace "org.vosk.vosk_flutter"\n', 1))
+          PY
+
+      - name: 6. Resolver dependencias y verificar compatibilidad
+        run: |
+          set -e
+          if ! flutter pub get; then
+            echo "::warning::Resolución estricta falló; relajando rangos no críticos y reintentando."
+            python3 - <<'PY'
+            import re
+            txt = open('pubspec.yaml', encoding='utf-8').read()
+            lines = txt.splitlines()
+            out = []
+            in_deps = False
+            for l in lines:
+                if re.match(r'^(dependencies|dev_dependencies):\s*$', l):
+                    in_deps = True
+                    out.append(l)
+                    continue
+                if in_deps and re.match(r'^[A-Za-z0-9_]+:', l):
+                    in_deps = False
+                if in_deps and re.match(r'^\s{2}[a-z0-9_]+:\s*[\^<>=~]', l):
+                    pkg = l.split(':', 1)[0].strip()
+                    if pkg not in ('flutter', 'flutter_test', 'flutter_lints'):
+                        out.append(f'  {pkg}: any')
+                        continue
+                out.append(l)
+            open('pubspec.yaml', 'w', encoding='utf-8').write('\n'.join(out) + '\n')
+            PY
+            flutter pub get
+          fi
+
+      - name: 7. Compilar APK para Android 16
+        run: flutter build apk --debug --build-number=${{ github.run_number }}
+
+      - name: 8. Subir APK compilado
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-android16-build-${{ github.run_number }}
+          path: build/app/outputs/flutter-apk/app-debug.apk
